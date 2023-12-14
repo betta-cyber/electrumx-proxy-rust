@@ -1,18 +1,19 @@
 use axum::{
     routing::{get, post},
     http::StatusCode,
-    Json, Router,
+    Json, Router, Extension,
     response::IntoResponse,
     extract::Path,
 };
+use log::debug;
+use std::net::SocketAddr;
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
-// use std::str;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-// use tokio::io::Interest;
-// use reqwest;
 use serde_json::{Value};
 use tokio::time::{timeout, Duration};
+use tokio::sync::Mutex;
 
 
 // 定义 RpcRequest 结构体表示 JSON-RPC 请求
@@ -43,14 +44,31 @@ struct RpcParam {
 async fn main() {
     // initialize tracing
     // build our application with a route
+    env_logger::init();
+
+    let electrumx_host = "0.0.0.0";
+    let electrumx_port = 50010;
+
+    let tcp_stream = Arc::new(Mutex::new(TcpStream::connect(format!(
+        "{}:{}",
+        electrumx_host, electrumx_port
+    ))
+    .await
+    .unwrap()));
+
     let app = Router::new()
         .route("/", get(root))
+        .route("/proxy/health", get(health_check))
         .route("/proxy/:method", get(proxy))
-        .route("/proxy/:method", post(proxy));
+        .route("/proxy/:method", post(proxy))
+        .layer(Extension(tcp_stream));
 
-    // run our app with hyper, listening globally on port 3000
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    // tracing::debug!("listening on {}", addr);
+    axum::Server::bind(&addr)
+        .serve(app.into_make_service())
+        .await
+        .unwrap();
 }
 
 // basic handler that responds with a static string
@@ -61,20 +79,18 @@ async fn root() -> &'static str {
 
 
 async fn proxy(
+        Extension(state): Extension<Arc<Mutex<TcpStream>>>,
         Path(method): Path<String>,
         Json(param): Json<RpcParam>,
     ) -> impl IntoResponse {
 
-    let electrumx_host = "0.0.0.0";
-    let electrumx_port = 50010;
-
     let method = method;
     let params = param.params;
-    println!("{:#?}", method);
-    println!("{:#?}", params);
+    debug!("{:#?}", method);
+    debug!("{:#?}", params);
 
     // 调用 ElectrumX JSON-RPC
-    let response = send_request(electrumx_host, electrumx_port, &method, params).await.unwrap();
+    let response = send_request(&state, &method, params).await.unwrap();
     let res = serde_json::json!({
         "success": true,
         "response": response.result
@@ -84,7 +100,19 @@ async fn proxy(
 }
 
 
-async fn send_request(host: &str, port: u16, method: &str, params: Vec<serde_json::Value>) -> Result<RpcResponse, Box<dyn std::error::Error>> {
+async fn health_check(
+        Extension(state): Extension<Arc<Mutex<TcpStream>>>,
+) -> impl IntoResponse {
+    // Performing a simple health check by sending an ElectrumX version request
+    let response = send_request(&state, "server.version", vec![]).await;
+
+    match response {
+        Ok(_) => (StatusCode::OK, "ElectrumX is healthy"),
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "ElectrumX is unreachable"),
+    }
+}
+
+async fn send_request(stream: &Arc<Mutex<TcpStream>>, method: &str, params: Vec<serde_json::Value>) -> Result<RpcResponse, Box<dyn std::error::Error>> {
     // 构建 JSON-RPC 请求
     let request = RpcRequest {
         jsonrpc: "2.0",
@@ -98,7 +126,8 @@ async fn send_request(host: &str, port: u16, method: &str, params: Vec<serde_jso
     let a = format!("{}\n", request_json);
 
     // 创建异步 TCP 连接
-    let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
+    // let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
+    let mut stream = stream.lock().await;
 
     // 发送请求
     stream.write_all(a.as_bytes()).await?;
