@@ -24,10 +24,6 @@ struct RpcRequest<'a> {
     id: usize,
 }
 
-#[derive(Debug, Deserialize)]
-struct Param {
-    params: Vec<Value>,
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RpcResponse {
@@ -35,6 +31,11 @@ struct RpcResponse {
     result: Option<serde_json::Value>,
     error: Option<serde_json::Value>,
     id: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct RpcParam {
+    params: Vec<Value>,
 }
 
 
@@ -61,21 +62,25 @@ async fn root() -> &'static str {
 
 async fn proxy(
         Path(method): Path<String>,
-        Json(params): Json<Param>,
+        Json(param): Json<RpcParam>,
     ) -> impl IntoResponse {
 
     let electrumx_host = "0.0.0.0";
     let electrumx_port = 50010;
 
     let method = method;
-    let params = params.params;
-    // println!("{:?}", params);
-    // let params = vec![];
+    let params = param.params;
+    println!("{:#?}", method);
+    println!("{:#?}", params);
 
-    // 调用 ElectrumX JSON-RPC 方法示例
+    // 调用 ElectrumX JSON-RPC
     let response = send_request(electrumx_host, electrumx_port, &method, params).await.unwrap();
+    let res = serde_json::json!({
+        "success": true,
+        "response": response.result
+    });
 
-    (StatusCode::OK, Json(response))
+    (StatusCode::OK, Json(res))
 }
 
 
