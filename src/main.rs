@@ -2,8 +2,41 @@ use axum::{
     routing::{get, post},
     http::StatusCode,
     Json, Router,
+    response::IntoResponse,
+    extract::Path,
 };
 use serde::{Deserialize, Serialize};
+// use std::str;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+// use tokio::io::Interest;
+// use reqwest;
+use serde_json::{Value};
+use tokio::time::{timeout, Duration};
+
+
+// 定义 RpcRequest 结构体表示 JSON-RPC 请求
+#[derive(Debug, Serialize, Deserialize)]
+struct RpcRequest<'a> {
+    jsonrpc: &'a str,
+    method: &'a str,
+    params: Vec<Value>,
+    id: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct Param {
+    params: Vec<Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RpcResponse {
+    // 根据实际响应的结构定义字段
+    result: Option<serde_json::Value>,
+    error: Option<serde_json::Value>,
+    id: usize,
+}
+
 
 #[tokio::main]
 async fn main() {
@@ -11,7 +44,8 @@ async fn main() {
     // build our application with a route
     let app = Router::new()
         .route("/", get(root))
-        .route("/proxy", post(proxy));
+        .route("/proxy/:method", get(proxy))
+        .route("/proxy/:method", post(proxy));
 
     // run our app with hyper, listening globally on port 3000
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
@@ -24,19 +58,69 @@ async fn root() -> &'static str {
     res
 }
 
-async fn proxy() -> (StatusCode, Json<User>) {
-    (StatusCode::CREATED, Json())
+
+async fn proxy(
+        Path(method): Path<String>,
+        Json(params): Json<Param>,
+    ) -> impl IntoResponse {
+
+    let electrumx_host = "0.0.0.0";
+    let electrumx_port = 50010;
+
+    let method = method;
+    let params = params.params;
+    // println!("{:?}", params);
+    // let params = vec![];
+
+    // 调用 ElectrumX JSON-RPC 方法示例
+    let response = send_request(electrumx_host, electrumx_port, &method, params).await.unwrap();
+
+    (StatusCode::OK, Json(response))
 }
 
-// the input to our `create_user` handler
-#[derive(Deserialize)]
-struct CreateUser {
-    username: String,
-}
 
-// the output to our `create_user` handler
-#[derive(Serialize)]
-struct User {
-    id: u64,
-    username: String,
+async fn send_request(host: &str, port: u16, method: &str, params: Vec<serde_json::Value>) -> Result<RpcResponse, Box<dyn std::error::Error>> {
+    // 构建 JSON-RPC 请求
+    let request = RpcRequest {
+        jsonrpc: "2.0",
+        method,
+        params,
+        id: 1,
+    };
+
+    // 将结构体转换为 JSON 字符串
+    let request_json = serde_json::to_string(&request)?;
+    let a = format!("{}\n", request_json);
+
+    // 创建异步 TCP 连接
+    let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
+
+    // 发送请求
+    stream.write_all(a.as_bytes()).await?;
+
+    let mut buffer = Vec::new();
+    let mut newline_found = false;
+
+    while !newline_found {
+        let mut chunk = vec![0; 1024]; // 适当调整缓冲区大小
+        let n = timeout(Duration::from_secs(5), stream.read(&mut chunk)).await??;
+
+        if n == 0 {
+            break; // 到达 EOF，结束循环
+        }
+
+        // 将读取的数据追加到缓冲区
+        buffer.extend_from_slice(&chunk[..n]);
+
+        // 检查是否包含 \n
+        if let Some(index) = buffer.iter().position(|&c| c == b'\n') {
+            newline_found = true;
+            buffer.truncate(index + 1); // 保留包含 \n 的部分，丢弃之后的数据
+        }
+    }
+
+    // 处理响应
+    let response_str = String::from_utf8_lossy(&buffer).to_string();
+    let response: RpcResponse = serde_json::from_str(&response_str)?;
+    Ok(response)
 }
